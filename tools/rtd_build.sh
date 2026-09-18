@@ -20,7 +20,7 @@
 # dispatch.
 
 set -euo pipefail
-
+#
 # --- Language detection ----------------------------------------------------
 # Explicit override (DOCS_LANG) wins, so local dev can bypass the
 # RTD-only project-slug heuristic.
