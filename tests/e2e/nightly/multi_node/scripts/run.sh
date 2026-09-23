@@ -283,6 +283,9 @@ run_tests_with_log() {
             echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
             cd "$WORKSPACE/vllm-ascend"
             build_bisect_extra_args
+            if [ -z "${COORD_DIR:-}" ]; then
+                BISECT_EXTRA_ARGS+=(--run-scoped-coord)
+            fi
             # Guard the agent: under `set -e` an uncaught crash would take the
             # whole pod down silently; instead capture the exit code and keep
             # the logs collectable.

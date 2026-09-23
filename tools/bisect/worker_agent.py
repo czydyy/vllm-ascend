@@ -103,9 +103,10 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
     # Doing this before the first round keeps the slow, network-bound unshallow
     # out of the barrier window (prepare() re-resolves as a no-op backstop).
     git_ops.ensure_full_history(opt.repo_dir)
-    # Only DONE/release files created AFTER this moment count as stop signals, so
-    # a stale sentinel from a previous run on the persistent PVC is ignored.
-    start_ts = time.time()
+    # A run-scoped directory has no stale signals; accept completion even when
+    # it happened during unshallow, without comparing clocks or file mtimes.
+    # Preserve the legacy timestamp filter for callers reusing a directory.
+    start_ts = None if opt.run_scoped_coord else time.time()
     rnd = 0
     while True:
         rnd += 1

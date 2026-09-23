@@ -209,8 +209,13 @@ jobs:
 
       - name: Prepare scripts
         run: |
-          install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
-          install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
+          if [ "${{ inputs.aop_multi_enabled }}" = "true" ]; then
+            script_dir="${LOG_PREFIX}/scripts"
+          else
+            script_dir=/root/.cache/tests
+          fi
+          install -D tests/e2e/nightly/multi_node/scripts/run.sh "${script_dir}/run.sh"
+          install -D tests/e2e/nightly/scripts/bisect_args.sh "${script_dir}/bisect_args.sh"
 
       - name: Clear resources
         run: |
@@ -394,51 +399,8 @@ jobs:
 
           LEADER_TMP=$(mktemp)
           if [ "${{ inputs.aop_multi_enabled }}" = "true" ]; then
-            # AOP/bisect can exceed the ~4h log-follow connection cap. Reconnect
-            # only for that opt-in path; ordinary multi-node tests retain their
-            # original one-shot log stream and completion behaviour.
-            leader_state() {
-              kubectl get pod "$LEADER_POD" -n "$NAMESPACE" \
-                -o jsonpath='{.metadata.uid}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].containerID}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].restartCount}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].state.running.startedAt}'
-            }
-            INITIAL_STATE=$(leader_state)
-            FINISHED_PREFIX="AOP_RUN_FINISHED:${LOG_PREFIX}:"
-            MAX_RECONNECTS=12
-            reconnects=0
-            while :; do
-              # Replay the full log on reconnect: a wall-clock cursor can skip
-              # completion/failure lines written while the connection is down.
-              kubectl logs -f "$LEADER_POD" -c vllm-leader -n "$NAMESPACE" \
-                | tee -a "$LEADER_TMP" || true
-              if grep -Fq "$FAIL_TAG" "$LEADER_TMP"; then
-                exit 1
-              fi
-              if grep -Fxq "${FINISHED_PREFIX}0" "$LEADER_TMP"; then
-                break
-              fi
-              if grep -Fq "$FINISHED_PREFIX" "$LEADER_TMP"; then
-                echo "::error::AOP leader exited with a nonzero status."
-                exit 1
-              fi
-              CURRENT_STATE=$(leader_state)
-              if [ "$CURRENT_STATE" != "$INITIAL_STATE" ] || [ -z "${CURRENT_STATE##*|}" ]; then
-                echo "::error::Leader exited or restarted without a completion result; refusing to follow another container."
-                exit 1
-              fi
-              if [ "$reconnects" -ge "$MAX_RECONNECTS" ]; then
-                echo "::error::Leader log reconnection limit reached."
-                exit 1
-              fi
-              reconnects=$((reconnects + 1))
-              echo "[stream] log connection dropped while the pod is still running; reconnecting..."
-              sleep 5
-              # Recheck after the delay so a restart during backoff is not
-              # mistaken for a dropped connection to the original container.
-              if [ "$(leader_state)" != "$INITIAL_STATE" ]; then
-                echo "::error::Leader state changed during log reconnect."
-                exit 1
-              fi
-            done
+            bash tests/e2e/nightly/multi_node/scripts/follow_aop_logs.sh \
+              "$LEADER_POD" "$NAMESPACE" "$LOG_PREFIX" "$FAIL_TAG" "$LEADER_TMP"
           else
             kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | tee "$LEADER_TMP" | while IFS= read -r line; do
               echo "$line"

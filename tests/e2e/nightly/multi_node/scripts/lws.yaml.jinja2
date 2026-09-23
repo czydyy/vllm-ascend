@@ -75,7 +75,11 @@ spec:
               - sh
               - -c
               - |
-                bash /root/.cache/tests/run.sh \
+                script=/root/.cache/tests/run.sh
+                if [ "$AOP_MULTI_ENABLED" = "true" ]; then
+                  script="${LOG_PREFIX}/scripts/run.sh"
+                fi
+                bash "$script" \
                   "{{ soc_version | default("") }}" \
                   "{{ max_good_age_days | default("3") }}"
 {% set soc = soc_version | default("a3") | lower %}
@@ -185,7 +189,11 @@ spec:
               - sh
               - -c
               - |
-                bash /root/.cache/tests/run.sh \
+                script=/root/.cache/tests/run.sh
+                if [ "$AOP_MULTI_ENABLED" = "true" ]; then
+                  script="${LOG_PREFIX}/scripts/run.sh"
+                fi
+                bash "$script" \
                   "{{ soc_version | default("") }}" \
                   "{{ max_good_age_days | default("3") }}"
 {% set soc = soc_version | default("a3") | lower %}

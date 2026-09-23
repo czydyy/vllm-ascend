@@ -220,6 +220,8 @@ class BisectOptions:
     # worker also exits promptly once this file appears (run.sh touches its
     # ``done`` file on every leader exit path).
     release_file: str | None = None
+    # Only set when the caller guarantees a fresh directory for this run.
+    run_scoped_coord: bool = False
     # Per-trial pytest timeout (seconds).
     trial_timeout_s: float = 7200.0
 

@@ -355,6 +355,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="this node's index; defaults to $LWS_WORKER_INDEX (set by LWS), else 0",
     )
     p.add_argument("--coord-dir", default=DEFAULT_COORD_DIR, help="shared barrier dir (multi-node)")
+    p.add_argument("--run-scoped-coord", action="store_true", help="coord and release paths are unique to this run")
     p.add_argument(
         "--release-file",
         default=None,
@@ -447,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
         num_nodes=num_nodes,
         node_index=args.node_index,
         release_file=args.release_file,
+        run_scoped_coord=args.run_scoped_coord,
         barrier_timeout_s=args.barrier_timeout_s,
         trial_timeout_s=args.trial_timeout_s,
         assume_built_head=not args.no_assume_built_head,
