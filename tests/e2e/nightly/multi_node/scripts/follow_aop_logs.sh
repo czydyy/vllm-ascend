@@ -32,8 +32,17 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 snapshot() {
-    kubectl --request-timeout=30s get pod "$pod" -n "$namespace" \
-        -o jsonpath='{.metadata.uid}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].containerID}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].restartCount}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].state.running.startedAt}'
+    local retry state
+    for ((retry=0; retry<3; retry++)); do
+        if state=$(kubectl --request-timeout=30s get pod "$pod" -n "$namespace" \
+            -o jsonpath='{.metadata.uid}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].containerID}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].restartCount}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].state.running.startedAt}'); then
+            printf '%s\n' "$state"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "::error::Unable to query leader state after three attempts." >&2
+    return 1
 }
 initial=$(snapshot)
 IFS='|' read -r initial_uid initial_id initial_restarts _ <<< "$initial"
@@ -44,7 +53,9 @@ fi
 finished="AOP_RUN_FINISHED:${run_prefix}:"
 check_result() {
     local line result=""
-    if grep -Fq "$fail_tag" "$scratch/logs"; then
+    # Only inspect a finite log snapshot whose container identity was checked
+    # both before and after retrieval. Live stream data is not authoritative.
+    if grep -Fq "$fail_tag" "$scratch/verified"; then
         exit 1
     fi
     # Inspect complete lines once; separate greps could race a newly written
@@ -53,7 +64,7 @@ check_result() {
         if [[ "$line" == "$finished"* ]]; then
             result=${line#"$finished"}
         fi
-    done < "$scratch/logs"
+    done < "$scratch/verified"
     if [ "$result" = 0 ]; then exit 0; fi
     if [ -n "$result" ]; then
         echo "::error::AOP leader reported failure."
@@ -61,30 +72,47 @@ check_result() {
     fi
 }
 recover_result() {
-    local current uid id restarts running
-    current=$(snapshot)
-    IFS='|' read -r uid id restarts running <<< "$current"
-    local previous=()
-    if [ "$uid" != "$initial_uid" ]; then
-        echo "::error::Leader pod was replaced; its original result is unavailable."
-        exit 1
-    fi
-    if [ "$id" != "$initial_id" ] || [ "$restarts" != "$initial_restarts" ]; then
-        if [[ "$restarts" =~ ^[0-9]+$ ]] && [ "$restarts" -eq "$((initial_restarts + 1))" ]; then
-            previous=(--previous)
-        else
-            echo "::error::Original leader container logs are no longer available."
+    local current after uid id restarts running retry
+    local previous
+    for ((retry=0; retry<3; retry++)); do
+        current=$(snapshot)
+        IFS='|' read -r uid id restarts running <<< "$current"
+        previous=()
+        if [ "$uid" != "$initial_uid" ]; then
+            echo "::error::Leader pod was replaced; its original result is unavailable."
             exit 1
         fi
-    fi
-    # Fetch the final lines even if the leader exited during the reconnect delay.
-    kubectl --request-timeout=30s logs "$pod" -c vllm-leader -n "$namespace" \
-        "${previous[@]}" >> "$scratch/logs"
-    check_result
-    if [ "$current" != "$initial" ] || [ -z "$running" ]; then
-        echo "::error::Leader ended without a completion result."
-        exit 1
-    fi
+        if [ "$id" != "$initial_id" ] || [ "$restarts" != "$initial_restarts" ]; then
+            if [[ "$restarts" =~ ^[0-9]+$ ]] && [ "$restarts" -eq "$((initial_restarts + 1))" ]; then
+                previous=(--previous)
+            else
+                echo "::error::Original leader container logs are no longer available."
+                exit 1
+            fi
+        fi
+        if ! kubectl --request-timeout=30s logs "$pod" -c vllm-leader -n "$namespace" \
+            "${previous[@]}" > "$scratch/candidate"; then
+            sleep 1
+            continue
+        fi
+        after=$(snapshot)
+        if [ "$after" != "$current" ]; then
+            # The fetch may contain a replacement container's result. Retry
+            # with the appropriate --previous selection; never accept it.
+            sleep 1
+            continue
+        fi
+        cp "$scratch/candidate" "$scratch/verified"
+        cat "$scratch/verified" >> "$output"
+        check_result
+        if [ "$current" != "$initial" ] || [ -z "$running" ]; then
+            echo "::error::Leader ended without a completion result."
+            exit 1
+        fi
+        return 0
+    done
+    echo "::error::Unable to retrieve stable leader logs after three attempts."
+    exit 1
 }
 
 MAX_RECONNECTS=12
@@ -97,16 +125,14 @@ for ((attempt=0; attempt<=MAX_RECONNECTS; attempt++)); do
     tail -n +1 -f "$scratch/logs" &
     display_pid=$!
     while kill -0 "$stream_pid" 2>/dev/null; do
-        if [ "$(snapshot)" != "$initial" ]; then
+        current=$(snapshot)
+        if [ "$current" != "$initial" ] || grep -Fq -e "$finished" -e "$fail_tag" "$scratch/logs"; then
             stop_stream
-            : > "$scratch/logs"
             recover_result
         fi
-        check_result
         sleep 1
     done
     stop_stream
-    check_result
     recover_result
     cat "$scratch/logs" >> "$output"
     if [ "$attempt" -lt "$MAX_RECONNECTS" ]; then
