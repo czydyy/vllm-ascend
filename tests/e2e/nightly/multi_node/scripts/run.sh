@@ -525,8 +525,21 @@ backup_ascend_logs() {
     fi
 }
 
+finish_run() {
+    local rc=$?
+    backup_ascend_logs || true
+    if [ "${AOP_MULTI_ENABLED:-}" = "true" ] && [ "${LWS_WORKER_INDEX:-}" = "0" ]; then
+        echo "AOP_RUN_FINISHED:${LOG_PREFIX}:${rc}"
+    fi
+    return "$rc"
+}
+
 main() {
-    trap backup_ascend_logs EXIT
+    if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
+        trap finish_run EXIT
+    else
+        trap backup_ascend_logs EXIT
+    fi
     check_npu_info
     clear_logs
     check_and_config

@@ -397,27 +397,47 @@ jobs:
             # AOP/bisect can exceed the ~4h log-follow connection cap. Reconnect
             # only for that opt-in path; ordinary multi-node tests retain their
             # original one-shot log stream and completion behaviour.
-            SINCE=""
+            leader_state() {
+              kubectl get pod "$LEADER_POD" -n "$NAMESPACE" \
+                -o jsonpath='{.metadata.uid}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].containerID}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].restartCount}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].state.running.startedAt}'
+            }
+            INITIAL_STATE=$(leader_state)
+            FINISHED_PREFIX="AOP_RUN_FINISHED:${LOG_PREFIX}:"
+            MAX_RECONNECTS=12
+            reconnects=0
             while :; do
-              kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" ${SINCE:+--since-time="$SINCE"} \
-                | tee -a "$LEADER_TMP" | while IFS= read -r line; do
-                    echo "$line"
-                    if echo "$line" | grep -q "$FAIL_TAG"; then
-                      touch /tmp/stream_fail_tag_seen
-                      break
-                    fi
-                  done || true
-              if [ -f /tmp/stream_fail_tag_seen ]; then
+              # Replay the full log on reconnect: a wall-clock cursor can skip
+              # completion/failure lines written while the connection is down.
+              kubectl logs -f "$LEADER_POD" -c vllm-leader -n "$NAMESPACE" \
+                | tee -a "$LEADER_TMP" || true
+              if grep -Fq "$FAIL_TAG" "$LEADER_TMP"; then
                 exit 1
               fi
-              if ! kubectl get pod "$LEADER_POD" -n "$NAMESPACE" \
-                  -o jsonpath='{.status.containerStatuses[0].state.running.startedAt}' 2>/dev/null \
-                  | grep -q '^2'; then
+              if grep -Fxq "${FINISHED_PREFIX}0" "$LEADER_TMP"; then
                 break
               fi
+              if grep -Fq "$FINISHED_PREFIX" "$LEADER_TMP"; then
+                echo "::error::AOP leader exited with a nonzero status."
+                exit 1
+              fi
+              CURRENT_STATE=$(leader_state)
+              if [ "$CURRENT_STATE" != "$INITIAL_STATE" ] || [ -z "${CURRENT_STATE##*|}" ]; then
+                echo "::error::Leader exited or restarted without a completion result; refusing to follow another container."
+                exit 1
+              fi
+              if [ "$reconnects" -ge "$MAX_RECONNECTS" ]; then
+                echo "::error::Leader log reconnection limit reached."
+                exit 1
+              fi
+              reconnects=$((reconnects + 1))
               echo "[stream] log connection dropped while the pod is still running; reconnecting..."
-              SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
               sleep 5
+              # Recheck after the delay so a restart during backoff is not
+              # mistaken for a dropped connection to the original container.
+              if [ "$(leader_state)" != "$INITIAL_STATE" ]; then
+                echo "::error::Leader state changed during log reconnect."
+                exit 1
+              fi
             done
           else
             kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | tee "$LEADER_TMP" | while IFS= read -r line; do
